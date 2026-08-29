@@ -58,7 +58,7 @@ export class UI {
     }
     $('lens').oninput = (e) => { this.h.cloud.uniforms.uLensStrength.value = Number(e.target.value) }
     $('radius').oninput = (e) => { this.h.cloud.uniforms.uLensRadius.value = Number(e.target.value) }
-    $('adaptive').onchange = (e) => { this.state.adaptive = e.target.checked }
+    $('autoframe').onchange = (e) => { this.state.autoFrame = e.target.checked }
     $('follow').onchange = (e) => { this.state.followLive = e.target.checked }
     $('activeonly').onchange = (e) => {
       this.state.activeOnly = e.target.checked

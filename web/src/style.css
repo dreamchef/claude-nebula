@@ -18,7 +18,7 @@ body {
 }
 /* A canvas is a replaced element: with width:auto it lays out at its intrinsic
    (drawing-buffer) size and the inset is ignored, so size it explicitly. */
-#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: default; }
 
 .panel {
   position: fixed;

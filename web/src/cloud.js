@@ -146,9 +146,19 @@ export class Cloud {
 
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.07
-    this.controls.rotateSpeed = 0.5
-    this.controls.zoomSpeed = 0.9
+    // Total coast after release scales as 1/dampingFactor. At 0.14 the camera
+    // glided ~7x the last frame's delta, which reads as sloppy on a tool you
+    // aim with; this tracks the pointer closely and stops when you stop.
+    this.controls.dampingFactor = 0.35
+    this.controls.rotateSpeed = 0.75
+    this.controls.zoomSpeed = 1.1
+    this.controls.panSpeed = 0.9
+    this.controls.screenSpacePanning = true
+    // Scroll zooms toward the pointer, so you close in on the cluster you are
+    // actually looking at instead of the centre of the screen.
+    this.controls.zoomToCursor = true
+    this.controls.minDistance = 3
+    this.controls.maxDistance = 400
 
     this.composer = new EffectComposer(this.renderer)
     this.composer.addPass(new RenderPass(this.scene, this.camera))

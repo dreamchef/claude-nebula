@@ -19,14 +19,13 @@ const state = {
   pinned: -1,
   layout: 0,
   colorMode: 0,
-  adaptive: true,
+  autoFrame: true, // fly to search hits and to whichever conversation picks up work
   relActive: 0,
   relTarget: 0,
   query: null,
   selSession: -1,
-  lastUserZoom: 0,
   home: { target: new THREE.Vector3(0, 0, 0), dist: 92 },
-  manual: false,
+  driving: false,
   followLive: true,
   activeOnly: true,
   store: null,
@@ -183,7 +182,6 @@ const mouse = new THREE.Vector2(-2, -2)
 let mouseMovedAt = 0
 let dwellAt = 0
 let cursorMoved = false
-let settled = false
 
 addEventListener('pointermove', (e) => {
   const x = (e.clientX / innerWidth) * 2 - 1
@@ -193,27 +191,27 @@ addEventListener('pointermove', (e) => {
   mouse.x = x
   mouse.y = y
   cursorMoved = true
-  state.manual = false // the cursor is driving again
   ui.cursor(e.clientX, e.clientY)
   mouseMovedAt = performance.now()
 })
-addEventListener('wheel', () => { state.lastUserZoom = performance.now() }, { passive: true })
-
-// Navigating by hand sticks: adopt wherever the user left the camera as the
-// resting pose, and stay out of the way until the cursor drives again.
-cloud.controls.addEventListener('start', () => {
-  state.lastUserZoom = performance.now()
-  state.manual = true
-  settled = false
-})
+// Any touch of the controls takes the camera, and keeps it: `driving` is held
+// for the whole gesture rather than being cleared by the pointermoves a drag
+// is made of.
+addEventListener('wheel', () => { cancelFlight() }, { passive: true })
+cloud.controls.addEventListener('start', () => { state.driving = true; cancelFlight() })
 cloud.controls.addEventListener('end', () => {
-  state.lastUserZoom = performance.now()
+  state.driving = false
   state.home.target.copy(cloud.controls.target)
   state.home.dist = cloud.camera.position.distanceTo(cloud.controls.target)
 })
-document.getElementById('stage').addEventListener('pointerdown', () => { state.downAt = performance.now() })
+document.getElementById('stage').addEventListener('pointerdown', (e) => {
+  state.downX = e.clientX
+  state.downY = e.clientY
+})
 document.getElementById('stage').addEventListener('pointerup', (e) => {
-  if (performance.now() - (state.downAt || 0) > 240) return // a drag, not a pick
+  // A slow, deliberate click is still a click; what makes it a drag is that the
+  // pointer travelled.
+  if (Math.hypot(e.clientX - state.downX, e.clientY - state.downY) > 5) return
   if (state.hover >= 0) pin(state.hover)
   else { state.pinned = -1; state.selSession = -1; ui.closeDetail() }
 })
@@ -330,7 +328,7 @@ function flyToMatches() {
   const p = new THREE.Vector3()
   for (const i of idx) c.add(worldPos(i, p))
   c.divideScalar(idx.length)
-  state.flyTo = c
+  flyTo(c, 46)
   ui.showMatches(idx.slice(0, 8))
 }
 
@@ -359,8 +357,14 @@ function frame(dt, now = performance.now()) {
   // picking reads those displaced positions, so re-picking under a stationary
   // cursor would feed the view back into itself.
   const morphing = weights.manhattanDistanceTo(targetWeights) > 0.002
+  const cam = cloud.camera.position
+  const cameraMoved =
+    lastCam.distanceToSquared(cam) > 1e-6 || lastTarget.distanceToSquared(cloud.controls.target) > 1e-6
+  lastCam.copy(cam)
+  lastTarget.copy(cloud.controls.target)
+
   pickAcc += dt
-  if (state.layouts && (cursorMoved || morphing) && pickAcc > 0.045) {
+  if (state.layouts && (cursorMoved || cameraMoved || morphing) && pickAcc > 0.045) {
     pickAcc = 0
     cursorMoved = false
     const hit = pick()
@@ -386,13 +390,15 @@ function frame(dt, now = performance.now()) {
   state.relActive += (state.relTarget - state.relActive) * (1 - Math.pow(0.02, dt))
   cloud.uniforms.uRelActive.value = state.relActive
 
-  updateCamera(dt, now, focus)
+  updateCamera(dt)
 
   updateLabels()
   cloud.render(dt)
 }
 
 const _l = new THREE.Vector3()
+const lastCam = new THREE.Vector3()
+const lastTarget = new THREE.Vector3()
 let labelAcc = 0
 
 /** Screen-space markers for the conversations that are running right now. */
@@ -439,144 +445,71 @@ function animate() {
 }
 
 /**
- * Where the camera wants to be, as a function of what is under the cursor
- * right now — never of how long it has been there. A pose that integrated
- * dwell time would keep creeping while the cursor sat still.
+ * Automatic camera movement, and the rules it lives by.
+ *
+ * The camera belongs to whoever is dragging it. Earlier this eased toward a
+ * pose derived from whatever was under the cursor, which meant merely moving
+ * the mouse threw the view across the cloud, a drag longer than the grace
+ * period got fought mid-gesture, and the pose's distance term quietly undid
+ * every scroll. The cursor now drives the lens and nothing else.
+ *
+ * What is left is a finite flight, used only for things the viewer actually
+ * asked for — a search result, a neighbour, a different conversation picking up
+ * the work — and any touch of the controls cancels it on the spot.
  */
-function desiredPose(focus, out) {
-  if (state.flyTo) {
-    out.target.copy(state.flyTo)
-    out.dist = 46
-    return out
-  }
-  if (state.hover >= 0 && !state.manual) {
-    out.target.copy(focus)
-    // Close enough to read the conversation you are pointing at, sized to that
-    // conversation's own island rather than a fixed number.
-    const island = state.store?.island.get(state.cols.session[state.hover])
-    out.dist = THREE.MathUtils.clamp((island ? island.radius : 8) * 3.2 + 10, 16, 90)
-    return out
-  }
-  out.target.copy(state.home.target)
-  out.dist = state.home.dist
-  return out
+const flight = {
+  active: false,
+  t: 0,
+  dur: 0.85,
+  fromTarget: new THREE.Vector3(),
+  toTarget: new THREE.Vector3(),
+  fromDist: 0,
+  toDist: 0,
 }
 
-const pose = { target: new THREE.Vector3(), dist: 92 }
-
-/**
- * Eases toward the desired pose and then stops writing to the camera at all.
- * "Settled" has to mean no further motion, not asymptotically less of it.
- */
-function updateCamera(dt, now, focus) {
-  if (!state.adaptive || now - state.lastUserZoom < 900) return
-  desiredPose(focus, pose)
-
+export function flyTo(target, dist) {
+  if (!state.autoFrame || state.driving) return
   const ctl = cloud.controls
-  const dir = cloud.camera.position.clone().sub(ctl.target)
-  const dist = dir.length()
-  const offTarget = ctl.target.distanceTo(pose.target)
-  const offDist = Math.abs(dist - pose.dist)
+  flight.fromTarget.copy(ctl.target)
+  flight.toTarget.copy(target)
+  flight.fromDist = cloud.camera.position.distanceTo(ctl.target)
+  flight.toDist = dist ?? flight.fromDist
+  flight.t = 0
+  flight.active = true
+}
 
-  if (offTarget < 0.05 && offDist < 0.1) {
-    if (!settled) {
-      // Land exactly on the pose once, then leave the camera alone entirely.
-      ctl.target.copy(pose.target)
-      cloud.camera.position.copy(pose.target).add(dir.setLength(pose.dist))
-      settled = true
-      if (state.flyTo) state.flyTo = null
-    }
-    return
-  }
+function cancelFlight() {
+  flight.active = false
+}
 
-  settled = false
-  const k = (1 - Math.pow(0.02, dt)) * 0.5
-  ctl.target.lerp(pose.target, k)
-  dir.setLength(THREE.MathUtils.lerp(dist, pose.dist, k))
-  cloud.camera.position.copy(ctl.target).add(dir)
+const easeInOut = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+const _dir = new THREE.Vector3()
+
+function updateCamera(dt) {
+  if (!flight.active) return
+  // Never wrestle the user for the camera.
+  if (state.driving) return cancelFlight()
+
+  flight.t = Math.min(1, flight.t + dt / flight.dur)
+  const k = easeInOut(flight.t)
+  const ctl = cloud.controls
+  _dir.copy(cloud.camera.position).sub(ctl.target)
+  ctl.target.lerpVectors(flight.fromTarget, flight.toTarget, k)
+  _dir.setLength(THREE.MathUtils.lerp(flight.fromDist, flight.toDist, k))
+  cloud.camera.position.copy(ctl.target).add(_dir)
+  if (flight.t >= 1) flight.active = false
 }
 
 /**
- * Restrict the cloud to conversations whose process is still running.
- *
- * "Active" is the process being alive, not Claude currently inferring — a
- * session waiting on you is still yours to keep an eye on. Everything else is
- * finished history: it is what made the view unreadably dense, so by default it
- * is not drawn at all, and what remains is scaled up to fill the space.
+ * Open on the work in progress. The very first framing is instant — there is
+ * nothing to preserve yet — but every later one is a flight the viewer can
+ * cancel simply by touching the controls.
  */
-function applyFilter() {
-  const store = state.store
-  if (!store) return
-
-  const active = new Set()
-  for (const sid of store.liveSessions) {
-    const i = store.indexOfSession.get(sid)
-    if (i !== undefined) active.add(i)
-  }
-  state.activeSessions = active
-
-  const on = state.activeOnly && active.size > 0
-  const vis = state.arrays.aVisible.array
-  let shown = 0
-  for (let i = 0; i < store.count; i++) {
-    const v = on ? (active.has(state.cols.session[i]) ? 1 : 0) : 1
-    vis[i] = v
-    shown += v
-  }
-  cloud.geometry.getAttribute('aVisible').needsUpdate = true
-  state.shown = shown
-
-  // Reclaim the space the archive was using.
-  const c = cloud.uniforms.uFilterCenter.value
-  let scale = 1
-  if (on) {
-    const centers = [...active].map((i) => store.island.get(i)).filter(Boolean)
-    if (centers.length) {
-      c.set(0, 0, 0)
-      for (const is of centers) c.add(new THREE.Vector3(...is.center))
-      c.divideScalar(centers.length)
-      let extent = 0
-      for (const is of centers)
-        extent = Math.max(extent, c.distanceTo(new THREE.Vector3(...is.center)) + is.radius)
-      scale = THREE.MathUtils.clamp(52 / Math.max(extent, 1), 1, 7)
-    }
-  } else {
-    c.set(0, 0, 0)
-  }
-  cloud.uniforms.uFilterScale.value = scale
-  cloud.syncFilterTransform()
-
-  cloud.setThreads(threadSegments(state.arrays.position.array, state.cols, 16, (i) => vis[i] > 0, store.count))
-  ui.shown(shown, store.count, active.size)
-  framedLive = false
-  settled = false
-  frameLive()
-}
-
-/**
- * Shift attention when a *different* conversation picks up the work.
- *
- * Flying to every arriving turn meant a busy session dragged the camera around
- * every few seconds with the cursor untouched — motion the viewer never asked
- * for. Turns landing in the conversation we are already watching are conveyed
- * by their arrival flare instead, which costs no camera movement at all.
- */
-let followed = null
-function followLive(msg, added) {
-  if (!state.followLive || !added.length) return
-  if (msg.sessionId === followed) return
-  // Never yank the view while it is being read or driven by hand.
-  if (state.hover >= 0 || state.manual) return
-  followed = msg.sessionId
-  worldPos(added[added.length - 1], _v, false)
-  state.flyTo = _v.clone()
-}
-
-/** Opens on the work in progress: frame the running conversations. */
-let framedLive = false
+let framedOnce = false
+let activeSig = null
 function frameLive() {
   const store = state.store
-  if (!store || framedLive || !state.followLive) return
+  if (!store || !state.followLive) return
   const centers = []
   for (const sessionId of store.liveSessions) {
     const idx = store.indexOfSession.get(sessionId)
@@ -584,7 +517,7 @@ function frameLive() {
     if (island) centers.push(island)
   }
   if (!centers.length) return
-  framedLive = true
+
   const fc = cloud.uniforms.uFilterCenter.value
   const fs = cloud.uniforms.uFilterScale.value
   const world = (i) => new THREE.Vector3(...i.center).sub(fc).multiplyScalar(fs).add(fc)
@@ -593,11 +526,18 @@ function frameLive() {
   c.divideScalar(centers.length)
   let span = 0
   for (const i of centers) span = Math.max(span, c.distanceTo(world(i)) + i.radius * fs)
-  cloud.controls.target.copy(c)
-  cloud.camera.position.copy(c).add(new THREE.Vector3(0, span * 0.5 + 8, span * 2.2 + 34))
+  const dist = span * 2.2 + 34
+
   state.home.target.copy(c)
-  state.home.dist = cloud.camera.position.distanceTo(c)
-  settled = false
+  state.home.dist = dist
+
+  if (!framedOnce) {
+    framedOnce = true
+    cloud.controls.target.copy(c)
+    cloud.camera.position.copy(c).add(new THREE.Vector3(0, span * 0.5 + 8, dist))
+    return
+  }
+  flyTo(c, dist)
 }
 
 /* ---------- panels ---------- */
@@ -633,13 +573,13 @@ ui.bind({
     })).json()
     if (r.vector) applyQuery(Float32Array.from(r.vector))
   },
-  onFocusPoint: (i) => { state.hover = i; pin(i); worldPos(i, _v); state.flyTo = _v.clone() },
+  onFocusPoint: (i) => { state.hover = i; pin(i); worldPos(i, _v, false); flyTo(_v, 34) },
   onSelectSession: (sid) => {
     const idx = state.meta.sessions.findIndex((s) => s.sessionId === sid)
     if (idx < 0) return
     state.selSession = idx
     const first = state.cols.session.indexOf(idx)
-    if (first >= 0) { worldPos(first, _v); state.flyTo = _v.clone() }
+    if (first >= 0) { worldPos(first, _v, false); flyTo(_v, 40) }
   },
   onFilterChange: () => applyFilter(),
   cloud,
