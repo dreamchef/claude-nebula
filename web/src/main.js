@@ -28,7 +28,7 @@ const state = {
   home: { target: new THREE.Vector3(0, 0, 0), dist: 92 },
   manual: false,
   followLive: true,
-  liveOnly: false,
+  activeOnly: true,
   store: null,
 }
 
@@ -130,6 +130,7 @@ async function load() {
     aSession: { array: new Float32Array(cap), size: 1 },
     aBorn: { array: new Float32Array(cap), size: 1 },
     aLive: { array: new Float32Array(cap), size: 1 },
+    aVisible: { array: new Float32Array(cap).fill(1), size: 1 },
   }
   for (let i = 0; i < n; i++) {
     arrays.aKind.array[i] = kind[i]
@@ -148,6 +149,7 @@ async function load() {
 
   state.store = new PointStore(meta, cols, arrays, state.sim, n, cap)
   ui.ready(meta)
+  applyFilter()
   animate()
 
   api('/cloud/snippets.json').then((r) => r.json()).then((sn) => {
@@ -161,10 +163,11 @@ async function load() {
       state.liveActivity = activity
       ui.processes(procs, activity)
       cloud.grow(state.store.count)
-      frameLive()
+      applyFilter()
     },
     onPoints: (msg, added, activity) => {
       cloud.grow(state.store.count)
+      for (let i = 0; i < added.length; i++) state.arrays.aVisible.array[added[i]] = 1
       state.liveActivity = activity
       ui.activity(msg, activity)
       updateLabels(true)
@@ -239,6 +242,14 @@ function worldPos(i, out, lens = true) {
   const fx = f.uFocus.value
   x += (fx.x - x) * s; y += (fx.y - y) * s; z += (fx.z - z) * s
 
+  const fc = f.uFilterCenter.value
+  const fs = f.uFilterScale.value
+  if (fs !== 1) {
+    x = fc.x + (x - fc.x) * fs
+    y = fc.y + (y - fc.y) * fs
+    z = fc.z + (z - fc.z) * fs
+  }
+
   if (!lens) return out.set(x, y, z)
 
   const dx = x - fx.x, dy = y - fx.y, dz = z - fx.z
@@ -261,7 +272,9 @@ function pick() {
   let best = -1, bestScore = Infinity
   let heldScore = Infinity
   const RADIUS = 0.055 // in NDC
+  const vis = state.arrays.aVisible.array
   for (let i = 0; i < n; i++) {
+    if (vis[i] < 0.5) continue
     worldPos(i, _v).applyMatrix4(mvp)
     if (_v.z < -1 || _v.z > 1) continue
     const dx = _v.x - mouse.x, dy = _v.y - mouse.y
@@ -340,7 +353,6 @@ function frame(dt, now = performance.now()) {
   cloud.uniforms.uWeights.value.copy(weights)
   cloud.uniforms.uColorMode.value = state.colorMode
   cloud.uniforms.uSelSession.value = state.selSession
-  cloud.uniforms.uLiveOnly.value = state.liveOnly ? 1 : 0
 
   // Picking runs only when the cursor has actually moved (or while a layout
   // morph is still shifting points under it). The lens displaces points and
@@ -395,7 +407,13 @@ function updateLabels(force) {
     if (idx === undefined) continue
     const island = store.island.get(idx)
     if (!island) continue
-    _l.set(island.center[0], island.center[1] + island.radius + 2, island.center[2]).project(cloud.camera)
+    // Islands are stored unscaled; the filter's rescale has to be applied here
+    // too or the label drifts off its own cluster.
+    const fc = cloud.uniforms.uFilterCenter.value
+    const fs = cloud.uniforms.uFilterScale.value
+    _l.set(island.center[0], island.center[1] + island.radius + 2, island.center[2])
+      .sub(fc).multiplyScalar(fs).add(fc)
+      .project(cloud.camera)
     if (_l.z < -1 || _l.z > 1) continue
     const s = state.meta.sessions[idx]
     const act = state.liveActivity?.get(sessionId)
@@ -479,6 +497,63 @@ function updateCamera(dt, now, focus) {
 }
 
 /**
+ * Restrict the cloud to conversations whose process is still running.
+ *
+ * "Active" is the process being alive, not Claude currently inferring — a
+ * session waiting on you is still yours to keep an eye on. Everything else is
+ * finished history: it is what made the view unreadably dense, so by default it
+ * is not drawn at all, and what remains is scaled up to fill the space.
+ */
+function applyFilter() {
+  const store = state.store
+  if (!store) return
+
+  const active = new Set()
+  for (const sid of store.liveSessions) {
+    const i = store.indexOfSession.get(sid)
+    if (i !== undefined) active.add(i)
+  }
+  state.activeSessions = active
+
+  const on = state.activeOnly && active.size > 0
+  const vis = state.arrays.aVisible.array
+  let shown = 0
+  for (let i = 0; i < store.count; i++) {
+    const v = on ? (active.has(state.cols.session[i]) ? 1 : 0) : 1
+    vis[i] = v
+    shown += v
+  }
+  cloud.geometry.getAttribute('aVisible').needsUpdate = true
+  state.shown = shown
+
+  // Reclaim the space the archive was using.
+  const c = cloud.uniforms.uFilterCenter.value
+  let scale = 1
+  if (on) {
+    const centers = [...active].map((i) => store.island.get(i)).filter(Boolean)
+    if (centers.length) {
+      c.set(0, 0, 0)
+      for (const is of centers) c.add(new THREE.Vector3(...is.center))
+      c.divideScalar(centers.length)
+      let extent = 0
+      for (const is of centers)
+        extent = Math.max(extent, c.distanceTo(new THREE.Vector3(...is.center)) + is.radius)
+      scale = THREE.MathUtils.clamp(52 / Math.max(extent, 1), 1, 7)
+    }
+  } else {
+    c.set(0, 0, 0)
+  }
+  cloud.uniforms.uFilterScale.value = scale
+  cloud.syncFilterTransform()
+
+  cloud.setThreads(threadSegments(state.arrays.position.array, state.cols, 16, (i) => vis[i] > 0, store.count))
+  ui.shown(shown, store.count, active.size)
+  framedLive = false
+  settled = false
+  frameLive()
+}
+
+/**
  * Shift attention when a *different* conversation picks up the work.
  *
  * Flying to every arriving turn meant a busy session dragged the camera around
@@ -510,11 +585,14 @@ function frameLive() {
   }
   if (!centers.length) return
   framedLive = true
+  const fc = cloud.uniforms.uFilterCenter.value
+  const fs = cloud.uniforms.uFilterScale.value
+  const world = (i) => new THREE.Vector3(...i.center).sub(fc).multiplyScalar(fs).add(fc)
   const c = new THREE.Vector3()
-  for (const i of centers) c.add(new THREE.Vector3(...i.center))
+  for (const i of centers) c.add(world(i))
   c.divideScalar(centers.length)
   let span = 0
-  for (const i of centers) span = Math.max(span, c.distanceTo(new THREE.Vector3(...i.center)) + i.radius)
+  for (const i of centers) span = Math.max(span, c.distanceTo(world(i)) + i.radius * fs)
   cloud.controls.target.copy(c)
   cloud.camera.position.copy(c).add(new THREE.Vector3(0, span * 0.5 + 8, span * 2.2 + 34))
   state.home.target.copy(c)
@@ -563,6 +641,7 @@ ui.bind({
     const first = state.cols.session.indexOf(idx)
     if (first >= 0) { worldPos(first, _v); state.flyTo = _v.clone() }
   },
+  onFilterChange: () => applyFilter(),
   cloud,
   KIND_COLORS,
 })

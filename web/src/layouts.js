@@ -83,12 +83,13 @@ export function projectLayout(meta, cols) {
  * across the whole cloud are dropped: they say nothing about local structure
  * and would otherwise draw a web of long chords over everything.
  */
-export function threadSegments(pos, cols, maxLen = 16) {
-  const n = cols.session.length
+export function threadSegments(pos, cols, maxLen = 16, visible = null, count = null) {
+  const n = count ?? cols.session.length
   const segs = []
   const max2 = maxLen * maxLen
   for (let i = 1; i < n; i++) {
     if (cols.session[i] !== cols.session[i - 1]) continue
+    if (visible && (!visible(i) || !visible(i - 1))) continue
     const a = (i - 1) * 3, b = i * 3
     const d2 = (pos[a] - pos[b]) ** 2 + (pos[a + 1] - pos[b + 1]) ** 2 + (pos[a + 2] - pos[b + 2]) ** 2
     if (d2 > max2) continue

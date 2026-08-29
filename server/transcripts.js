@@ -90,12 +90,28 @@ function chunks(text) {
   return out
 }
 
+const QUESTION = 260
+
+/** The human turn an entry belongs to, or null if this entry is not one. */
+export function humanTurnText(e) {
+  if (e.type !== 'user' || !e.message) return null
+  const c = e.message.content
+  if (typeof c === 'string') return c.slice(0, QUESTION)
+  if (!Array.isArray(c)) return null
+  const text = c
+    .filter((b) => typeof b === 'string' || b?.type === 'text')
+    .map((b) => (typeof b === 'string' ? b : b.text || ''))
+    .join(' ')
+    .trim()
+  return text ? text.replace(/\s+/g, ' ').slice(0, QUESTION) : null
+}
+
 /**
  * Turns one transcript entry into its points: a text block, a thinking block,
  * a tool call, or a chunk of a long tool result. Shared by the batch indexer
  * and the live tail so both see conversation the same way.
  */
-export function extractPoints(e, seqStart = 0) {
+export function extractPoints(e, seqStart = 0, ctx = null) {
   const msg = e.message
   if (!msg) return []
   const ts = e.timestamp ? Date.parse(e.timestamp) : null
@@ -122,6 +138,11 @@ export function extractPoints(e, seqStart = 0) {
       out.push({
         seq: seq++,
         kind,
+        // What gets embedded is the turn in the context of the request it
+        // belongs to. A bare "ok, that works" carries no meaning on its own and
+        // would land wherever short acknowledgements happen to cluster; paired
+        // with the question it answers, it lands with the work it is about.
+        embedText: ctx?.question && kind !== 'user' ? `${ctx.question}\n\n${parts[ci]}` : parts[ci],
         t: ts,
         tool: btype === 'tool_use' ? b.name : null,
         error: btype === 'tool_result' && b.is_error ? 1 : 0,
@@ -166,6 +187,7 @@ export async function readTranscript(meta) {
   }
   const points = []
   let seq = 0
+  const ctx = { question: null }
 
   const rl = readline.createInterface({
     input: fs.createReadStream(meta.file, { encoding: 'utf8' }),
@@ -212,7 +234,9 @@ export async function readTranscript(meta) {
       if (human) session.userTurns++
     }
 
-    for (const p of extractPoints(e, seq)) {
+    const q = humanTurnText(e)
+    if (q) ctx.question = q
+    for (const p of extractPoints(e, seq, ctx)) {
       points.push(p)
       seq++
     }

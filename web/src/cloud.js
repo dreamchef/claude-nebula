@@ -22,6 +22,7 @@ attribute float aHue;
 attribute float aAge;
 attribute float aWeight;
 attribute float aSession;
+attribute float aVisible; // 0 when filtered out of the view entirely
 attribute float aBorn;   // when this turn arrived, for the arrival flare
 attribute float aLive;   // 1 if its conversation is running right now
 
@@ -37,7 +38,8 @@ uniform float uColorMode;
 uniform float uSelSession;
 uniform float uTime;
 uniform float uNow;
-uniform float uLiveOnly;
+uniform vec3 uFilterCenter;
+uniform float uFilterScale;
 uniform vec3 uKindColors[5];
 
 varying vec3 vColor;
@@ -50,7 +52,18 @@ vec3 hue2rgb(float h) {
 }
 
 void main() {
+  if (aVisible < 0.5) {
+    // Filtered out: collapse it rather than paying for a hidden fragment.
+    gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+    gl_PointSize = 0.0;
+    return;
+  }
+
   vec3 p = position * uWeights.x + aPosTime * uWeights.y + aPosProj * uWeights.z;
+  // With most of the archive filtered away, what remains is scaled up about
+  // its own centre so it fills the view. A uniform scale, so the distances
+  // between conversations still mean what they meant.
+  p = uFilterCenter + (p - uFilterCenter) * uFilterScale;
 
   // Semantic gravity: whatever matches what you are looking for drifts in
   // toward the focus, so the cloud reshapes itself around the question.
@@ -80,7 +93,6 @@ void main() {
   else if (uColorMode > 0.5) col = hue2rgb(aHue);
 
   float sel = uSelSession < 0.0 ? 1.0 : (abs(aSession - uSelSession) < 0.5 ? 1.0 : 0.22);
-  if (uLiveOnly > 0.5) sel *= mix(0.06, 1.0, aLive);
 
   // A turn that just landed flares and settles over about twelve seconds, so
   // motion in the view means work happening right now.
@@ -157,7 +169,8 @@ export class Cloud {
       uSelSession: { value: -1 },
       uTime: { value: 0 },
       uNow: { value: 0 },
-      uLiveOnly: { value: 0 },
+      uFilterCenter: { value: new THREE.Vector3() },
+      uFilterScale: { value: 1 },
       uKindColors: { value: KIND_COLORS.map((c) => new THREE.Vector3(...c)) },
     }
 
@@ -221,6 +234,13 @@ export class Cloud {
 
   /** Faint filaments joining consecutive points of one conversation. */
   setThreads(segments) {
+    if (this.threads) {
+      this.threads.geometry.dispose()
+      this.threads.geometry = new THREE.BufferGeometry()
+      this.threads.geometry.setAttribute('position', new THREE.BufferAttribute(segments, 3))
+      this.threads.geometry.computeBoundingSphere()
+      return
+    }
     const g = new THREE.BufferGeometry()
     g.setAttribute('position', new THREE.BufferAttribute(segments, 3))
     this.threads = new THREE.LineSegments(
@@ -239,6 +259,18 @@ export class Cloud {
 
   relevanceChanged() {
     this.geometry.getAttribute('aRel').needsUpdate = true
+  }
+
+  /**
+   * The filter's scale-about-a-centre is exactly an object transform, so the
+   * thread lines can follow it without a shader of their own.
+   */
+  syncFilterTransform() {
+    if (!this.threads) return
+    const s = this.uniforms.uFilterScale.value
+    const c = this.uniforms.uFilterCenter.value
+    this.threads.scale.setScalar(s)
+    this.threads.position.copy(c).multiplyScalar(1 - s)
   }
 
   render(dt) {

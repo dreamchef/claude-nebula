@@ -60,7 +60,10 @@ export class UI {
     $('radius').oninput = (e) => { this.h.cloud.uniforms.uLensRadius.value = Number(e.target.value) }
     $('adaptive').onchange = (e) => { this.state.adaptive = e.target.checked }
     $('follow').onchange = (e) => { this.state.followLive = e.target.checked }
-    $('liveonly').onchange = (e) => { this.state.liveOnly = e.target.checked }
+    $('activeonly').onchange = (e) => {
+      this.state.activeOnly = e.target.checked
+      this.h.onFilterChange()
+    }
     $('detail-close').onclick = () => this.closeDetail()
 
     $('legend').innerHTML = KIND_NAMES.map(
@@ -68,13 +71,32 @@ export class UI {
     ).join('')
   }
 
+  /** Says plainly how much of the archive the current filter is hiding. */
+  shown(shown, total, sessions) {
+    this._shown = { shown, total, sessions }
+    this.renderStats()
+  }
+
+  renderStats() {
+    const meta = this._meta
+    if (!meta) return
+    const s = this._shown
+    const tokens = meta.sessions.reduce((t, x) => t + x.tokensIn + x.tokensOut, 0)
+    const scope =
+      s && s.shown < s.total
+        ? `<b>${num(s.shown)}</b> points in <b>${s.sessions}</b> active session${s.sessions === 1 ? '' : 's'} · <span class="muted">${num(
+            s.total - s.shown
+          )} archived hidden</span>`
+        : `<b>${num(s ? s.shown : meta.count)}</b> points · <b>${meta.sessions.length}</b> sessions`
+    $('stats').innerHTML =
+      `${scope} · <b>${new Set(meta.sessions.map((x) => x.projectPath)).size}</b> projects · <b>${num(tokens)}</b> tokens`
+  }
+
   ready(meta) {
     $('boot').hidden = true
     for (const id of ['hud-top', 'procs', 'controls']) $(id).hidden = false
-    const tokens = meta.sessions.reduce((t, s) => t + s.tokensIn + s.tokensOut, 0)
-    $('stats').innerHTML =
-      `<b>${num(meta.count)}</b> points · <b>${meta.sessions.length}</b> sessions · ` +
-      `<b>${new Set(meta.sessions.map((s) => s.projectPath)).size}</b> projects · <b>${num(tokens)}</b> tokens`
+    this._meta = meta
+    this.renderStats()
   }
 
   cursor(x, y) {

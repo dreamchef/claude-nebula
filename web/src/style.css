@@ -151,3 +151,5 @@ body {
 .labels .lab .name { color: var(--accent); letter-spacing: 0.08em; }
 .labels .lab .ring:not(.busy) + .name { color: #6f8091; }
 .labels .lab .act { color: #9fb0c6; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
+
+.stats .muted { color: #5c6675; }

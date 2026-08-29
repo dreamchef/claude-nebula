@@ -29,7 +29,7 @@ export async function build(onProgress = () => {}) {
     sessions.push(session)
     for (const p of pts) {
       points.push({ s: si, ...p })
-      texts.push(p.text)
+      texts.push(p.embedText || p.text)
     }
   }
 

@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import readline from 'node:readline'
 import { EventEmitter } from 'node:events'
-import { listTranscripts, extractPoints } from './transcripts.js'
+import { listTranscripts, extractPoints, humanTurnText } from './transcripts.js'
 import { embedOne, DIM } from './embed.js'
 import { CLOUD_DIR, SIM_DIM } from './build.js'
 import { scanProcesses } from './scan.js'
@@ -26,6 +26,7 @@ export class LiveTail extends EventEmitter {
     super()
     this.offsets = new Map() // file -> bytes already consumed
     this.seq = new Map() // sessionId -> next point sequence
+    this.ctx = new Map() // sessionId -> the human turn currently being answered
     this.started = false
     this.pca = null
   }
@@ -109,8 +110,10 @@ export class LiveTail extends EventEmitter {
       if (e.type === 'ai-title' && e.aiTitle) { title = e.aiTitle; continue }
       if (e.cwd) cwd = e.cwd
       if (e.type !== 'user' && e.type !== 'assistant') continue
+      const q = humanTurnText(e)
+      if (q) this.ctx.set(t.sessionId, { question: q })
       const start = this.seq.get(t.sessionId) ?? 0
-      const pts = extractPoints(e, start)
+      const pts = extractPoints(e, start, this.ctx.get(t.sessionId) || null)
       if (!pts.length) continue
       this.seq.set(t.sessionId, start + pts.length)
       batch.push(...pts)
@@ -124,7 +127,7 @@ export class LiveTail extends EventEmitter {
     for (const p of use) {
       let sim = null
       try {
-        sim = this.project(await embedOne(p.text))
+        sim = this.project(await embedOne(p.embedText || p.text))
       } catch {}
       if (!sim) continue
       out.push({
