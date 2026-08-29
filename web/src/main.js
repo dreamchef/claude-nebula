@@ -501,6 +501,90 @@ function updateCamera(dt) {
 }
 
 /**
+ * Restrict the cloud to conversations whose process is still running.
+ *
+ * "Active" is the process being alive, not Claude currently inferring — a
+ * session waiting on you is still yours to keep an eye on. Everything else is
+ * finished history: it is what made the view unreadably dense, so by default it
+ * is not drawn at all, and what remains is scaled up to fill the space.
+ */
+function applyFilter() {
+  const store = state.store
+  if (!store) return
+
+  const active = new Set()
+  for (const sid of store.liveSessions) {
+    const i = store.indexOfSession.get(sid)
+    if (i !== undefined) active.add(i)
+  }
+  state.activeSessions = active
+
+  const on = state.activeOnly && active.size > 0
+  const vis = state.arrays.aVisible.array
+  let shown = 0
+  for (let i = 0; i < store.count; i++) {
+    const v = on ? (active.has(state.cols.session[i]) ? 1 : 0) : 1
+    vis[i] = v
+    shown += v
+  }
+  cloud.geometry.getAttribute('aVisible').needsUpdate = true
+  state.shown = shown
+
+  // Reclaim the space the archive was using.
+  const c = cloud.uniforms.uFilterCenter.value
+  let scale = 1
+  if (on) {
+    const centers = [...active].map((i) => store.island.get(i)).filter(Boolean)
+    if (centers.length) {
+      c.set(0, 0, 0)
+      for (const is of centers) c.add(new THREE.Vector3(...is.center))
+      c.divideScalar(centers.length)
+      let extent = 0
+      for (const is of centers)
+        extent = Math.max(extent, c.distanceTo(new THREE.Vector3(...is.center)) + is.radius)
+      scale = THREE.MathUtils.clamp(52 / Math.max(extent, 1), 1, 7)
+    }
+  } else {
+    c.set(0, 0, 0)
+  }
+  cloud.uniforms.uFilterScale.value = scale
+  cloud.syncFilterTransform()
+
+  ui.shown(shown, store.count, active.size)
+
+  // Re-framing on every process poll meant the camera snapped back to the live
+  // conversations every four seconds, throwing away whatever the viewer had
+  // just dragged or zoomed to. Only a genuine change of what is running earns
+  // a move of the camera.
+  const sig = [...active].sort((a, b) => a - b).join(',')
+  const changed = sig !== activeSig
+  activeSig = sig
+  if (changed) {
+    cloud.setThreads(threadSegments(state.arrays.position.array, state.cols, 16, (i) => vis[i] > 0, store.count))
+    frameLive()
+  }
+}
+
+/**
+ * Shift attention when a *different* conversation picks up the work.
+ *
+ * Flying to every arriving turn meant a busy session dragged the camera around
+ * every few seconds with the cursor untouched — motion the viewer never asked
+ * for. Turns landing in the conversation we are already watching are conveyed
+ * by their arrival flare instead, which costs no camera movement at all.
+ */
+let followed = null
+function followLive(msg, added) {
+  if (!state.followLive || !added.length) return
+  if (msg.sessionId === followed) return
+  // Never yank the view while it is being read or driven by hand.
+  if (state.hover >= 0 || state.driving) return
+  followed = msg.sessionId
+  worldPos(added[added.length - 1], _v, false)
+  flyTo(_v, 46)
+}
+
+/**
  * Open on the work in progress. The very first framing is instant — there is
  * nothing to preserve yet — but every later one is a flight the viewer can
  * cancel simply by touching the controls.
@@ -586,9 +670,16 @@ ui.bind({
   KIND_COLORS,
 })
 
-addEventListener('unhandledrejection', (e) => ui.bootMessage(`failed: ${e.reason?.message || e.reason}`, 0))
+// Browser extensions inject their own scripts into the page and reject their
+// own promises; reporting those as our boot failure buried the real error.
+addEventListener('unhandledrejection', (e) => {
+  const stack = e.reason?.stack || ''
+  if (!stack.includes(location.origin)) return
+  console.error('[nebula] unhandled', e.reason)
+  if (!state.meta) ui.bootMessage(`failed: ${e.reason?.message || e.reason}`, 0)
+})
 
 boot().catch((e) => {
-  console.error(e)
+  console.error('[nebula] boot failed', e)
   ui.bootMessage(`failed: ${e.message}`, 0)
 })
