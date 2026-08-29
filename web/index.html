@@ -28,7 +28,7 @@
     </header>
 
     <aside id="procs" class="panel side" hidden>
-      <h2>live processes</h2>
+      <h2>working now <span id="live-dot" class="dot"></span></h2>
       <ul id="proc-list"></ul>
     </aside>
 
@@ -57,9 +57,12 @@
       <label class="slide">lens <input id="lens" type="range" min="0" max="1.6" step="0.02" value="0.85" /></label>
       <label class="slide">focus <input id="radius" type="range" min="2" max="30" step="0.5" value="11" /></label>
       <label class="check"><input id="adaptive" type="checkbox" checked /> adaptive zoom</label>
+      <label class="check"><input id="follow" type="checkbox" checked /> follow live</label>
+      <label class="check"><input id="liveonly" type="checkbox" /> live only</label>
       <div id="legend" class="legend"></div>
     </footer>
 
+    <div id="labels" class="labels"></div>
     <div id="tip" class="tip" hidden></div>
     <script type="module" src="./src/main.js"></script>
   </body>

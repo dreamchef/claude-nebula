@@ -221,3 +221,118 @@ export function layout3d(P, n, k, graph, { epochs = 220, seed = 23, a = 1.6, b =
     for (let d = 0; d < 3; d++) pos[i * 3 + d] = ((pos[i * 3 + d] - c[d]) / max) * 60
   return pos
 }
+
+/**
+ * One cloud per conversation.
+ *
+ * A single global layout would interleave points from unrelated sessions, so a
+ * dense region could mix half a dozen conversations and read as one thing.
+ * Instead each session is laid out on its own and becomes a discrete island;
+ * the islands are then positioned relative to each other by the similarity of
+ * their centroids, and pushed apart until none overlap. Related conversations
+ * end up as neighbours, but nothing is ever blended.
+ */
+export function layoutIslands(P, n, k, sessionOf, nSessions, { gap = 2.4, seed = 41 } = {}) {
+  const rand = rng(seed)
+  const groups = Array.from({ length: nSessions }, () => [])
+  for (let i = 0; i < n; i++) groups[sessionOf[i]].push(i)
+
+  const centroids = new Float32Array(nSessions * k)
+  for (let s = 0; s < nSessions; s++) {
+    const g = groups[s]
+    if (!g.length) continue
+    for (const i of g) for (let c = 0; c < k; c++) centroids[s * k + c] += P[i * k + c]
+    for (let c = 0; c < k; c++) centroids[s * k + c] /= g.length
+  }
+
+  const anchors =
+    nSessions > 4
+      ? layout3d(centroids, nSessions, k, knn(centroids, nSessions, k, Math.min(8, nSessions - 1)), {
+          epochs: 400,
+          seed: 5,
+        })
+      : new Float32Array(nSessions * 3)
+
+  const radius = new Float32Array(nSessions)
+  const local = new Float32Array(n * 3)
+
+  for (let s = 0; s < nSessions; s++) {
+    const g = groups[s]
+    const m = g.length
+    if (!m) continue
+    radius[s] = 2.2 + 2.3 * Math.sqrt(m)
+
+    if (m < 8) {
+      // Too few points to say anything about internal structure; a small ring
+      // keeps them visible and obviously one conversation.
+      for (let t = 0; t < m; t++) {
+        const a = (t / m) * Math.PI * 2
+        local[g[t] * 3] = Math.cos(a) * radius[s] * 0.6
+        local[g[t] * 3 + 1] = ((t / Math.max(1, m - 1)) - 0.5) * radius[s]
+        local[g[t] * 3 + 2] = Math.sin(a) * radius[s] * 0.6
+      }
+      continue
+    }
+
+    const sub = new Float32Array(m * k)
+    for (let t = 0; t < m; t++) sub.set(P.subarray(g[t] * k, (g[t] + 1) * k), t * k)
+    const lp = layout3d(sub, m, k, knn(sub, m, k, Math.min(12, m - 1)), { epochs: 160, seed: 31 + s })
+    for (let t = 0; t < m; t++)
+      for (let d = 0; d < 3; d++) local[g[t] * 3 + d] = (lp[t * 3 + d] / 60) * radius[s]
+  }
+
+  // Separate the islands. Each is a sphere of its own radius; overlapping pairs
+  // repel until every conversation occupies distinct space.
+  const live = []
+  for (let s = 0; s < nSessions; s++) if (groups[s].length) live.push(s)
+  for (const s of live) {
+    // Break exact ties so coincident anchors can find a direction to move in.
+    for (let d = 0; d < 3; d++) anchors[s * 3 + d] += (rand() - 0.5) * 0.01
+  }
+  for (let iter = 0; iter < 400; iter++) {
+    let moved = 0
+    for (let a = 0; a < live.length; a++) {
+      for (let b = a + 1; b < live.length; b++) {
+        const i = live[a], j = live[b]
+        let dx = anchors[i * 3] - anchors[j * 3]
+        let dy = anchors[i * 3 + 1] - anchors[j * 3 + 1]
+        let dz = anchors[i * 3 + 2] - anchors[j * 3 + 2]
+        const dist = Math.hypot(dx, dy, dz) || 1e-4
+        const want = radius[i] + radius[j] + gap
+        if (dist >= want) continue
+        const push = ((want - dist) / dist) * 0.5
+        dx *= push; dy *= push; dz *= push
+        anchors[i * 3] += dx; anchors[i * 3 + 1] += dy; anchors[i * 3 + 2] += dz
+        anchors[j * 3] -= dx; anchors[j * 3 + 1] -= dy; anchors[j * 3 + 2] -= dz
+        moved++
+      }
+    }
+    if (!moved) break
+  }
+
+  const pos = new Float32Array(n * 3)
+  for (let i = 0; i < n; i++) {
+    const s = sessionOf[i]
+    for (let d = 0; d < 3; d++) pos[i * 3 + d] = anchors[s * 3 + d] + local[i * 3 + d]
+  }
+
+  // Normalise the whole constellation into the same world box as before.
+  const c = [0, 0, 0]
+  for (let i = 0; i < n; i++) for (let d = 0; d < 3; d++) c[d] += pos[i * 3 + d]
+  for (let d = 0; d < 3; d++) c[d] /= n
+  let max = 1e-6
+  for (let i = 0; i < n; i++)
+    for (let d = 0; d < 3; d++) max = Math.max(max, Math.abs(pos[i * 3 + d] - c[d]))
+  const scale = 60 / max
+  for (let i = 0; i < n; i++)
+    for (let d = 0; d < 3; d++) pos[i * 3 + d] = (pos[i * 3 + d] - c[d]) * scale
+
+  const islands = []
+  for (const s of live)
+    islands.push({
+      session: s,
+      center: [0, 1, 2].map((d) => (anchors[s * 3 + d] - c[d]) * scale),
+      radius: radius[s] * scale,
+    })
+  return { pos, islands }
+}

@@ -7,6 +7,8 @@
   --panel: rgba(9, 12, 19, 0.82);
 }
 * { box-sizing: border-box; }
+/* Author display rules outrank the UA sheet's [hidden], so restate it. */
+[hidden] { display: none !important; }
 html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
@@ -14,7 +16,9 @@ body {
   font: 12px/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   overflow: hidden;
 }
-#stage { position: fixed; inset: 0; display: block; cursor: crosshair; }
+/* A canvas is a replaced element: with width:auto it lays out at its intrinsic
+   (drawing-buffer) size and the inset is ignored, so size it explicitly. */
+#stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; cursor: crosshair; }
 
 .panel {
   position: fixed;
@@ -38,6 +42,8 @@ body {
   color: var(--ink); font: inherit; outline: none;
 }
 .search input:focus { border-color: var(--accent); }
+/* The UA's own clear affordance would sit on top of #q-clear. */
+.search input::-webkit-search-cancel-button { -webkit-appearance: none; appearance: none; }
 #q-clear {
   position: absolute; right: 4px; top: 3px;
   background: none; border: 0; color: var(--dim); font-size: 15px; cursor: pointer;
@@ -121,3 +127,27 @@ body {
   margin-top: 16px; background: #0d1420; border: 1px solid var(--accent);
   color: var(--accent); padding: 7px 16px; border-radius: 6px; font: inherit; cursor: pointer;
 }
+
+.doing { margin: 3px 0 2px; color: #c3d0e2; }
+.doing b { color: var(--accent); font-weight: 500; }
+.meta.idle { opacity: 0.6; }
+.side h2 .dot { margin-left: 6px; }
+
+.labels { position: fixed; inset: 0; z-index: 4; pointer-events: none; }
+.labels .lab {
+  position: absolute; transform: translate(-50%, -50%);
+  white-space: nowrap; text-align: center;
+}
+.labels .lab .ring {
+  width: 15px; height: 15px; margin: 0 auto 4px;
+  border: 1px solid rgba(110, 231, 255, 0.4); border-radius: 50%;
+}
+.labels .lab .ring.busy {
+  border-color: rgba(110, 231, 255, 0.9);
+  box-shadow: 0 0 12px rgba(110, 231, 255, 0.5);
+  animation: ping 2.4s ease-out infinite;
+}
+@keyframes ping { 0% { transform: scale(0.7); opacity: 1 } 100% { transform: scale(2.1); opacity: 0 } }
+.labels .lab .name { color: var(--accent); letter-spacing: 0.08em; }
+.labels .lab .ring:not(.busy) + .name { color: #6f8091; }
+.labels .lab .act { color: #9fb0c6; max-width: 260px; overflow: hidden; text-overflow: ellipsis; }

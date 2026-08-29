@@ -2,7 +2,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { listTranscripts, readTranscript } from './transcripts.js'
 import { embedAll, CACHE_DIR, DIM } from './embed.js'
-import { pca, knn, layout3d } from './layout.js'
+import { pca, layoutIslands } from './layout.js'
 
 export const SIM_DIM = 64
 const LABEL = 90
@@ -51,10 +51,11 @@ export async function build(onProgress = () => {}) {
     for (let c = 0; c < SIM_DIM; c++) sim[i * SIM_DIM + c] = proj[i * SIM_DIM + c] / m
   }
 
-  onProgress({ phase: 'reduce', done: 1, total: 3, label: 'knn' })
-  const graph = knn(proj, n, SIM_DIM)
-  onProgress({ phase: 'reduce', done: 2, total: 3, label: 'layout' })
-  const pos = layout3d(proj, n, SIM_DIM, graph)
+  onProgress({ phase: 'reduce', done: 1, total: 3, label: 'layout' })
+  const sessionOf = new Int32Array(n)
+  for (let i = 0; i < n; i++) sessionOf[i] = points[i].s
+  const { pos, islands } = layoutIslands(proj, n, SIM_DIM, sessionOf, sessions.length)
+  onProgress({ phase: 'reduce', done: 2, total: 3, label: 'columns' })
 
   // Compact, typed-array-friendly columns; the heavy snippet text is served
   // separately and only for the points the user actually inspects.
@@ -86,6 +87,7 @@ export async function build(onProgress = () => {}) {
       isSidechainOnly: s.isSidechainOnly,
     })),
     tools: [],
+    islands,
     labels: points.map((p) => p.text.slice(0, LABEL)),
   }
 

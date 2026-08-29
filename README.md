@@ -1,28 +1,29 @@
 # nebula
 
-A point-cloud visualizer for every Claude Code conversation on your machine.
+**See what your Claudes are doing, right now.**
 
-Nebula reads the transcripts under `~/.claude/projects`, embeds every message,
-tool call and tool result locally, and lays them out in 3D by **meaning** rather
-than by file. Move the cursor and the cloud responds: a lens unfolds the dense
-region you are pointing at, the camera eases in, and everything semantically
-close to what you are looking at brightens and drifts toward you while the rest
-falls away.
+Nebula is a live point-cloud view of every Claude Code session on your machine.
+Each conversation is its own cloud — never blended with anyone else's — and the
+clouds are arranged so that conversations about similar things sit near each
+other. Sessions that are running right now glow, get a labelled marker, and
+grow in real time as their turns are written; everything else recedes into the
+background as context.
 
-It also watches the live `claude` processes on the machine and links each one to
-the transcript it is currently writing.
+The cursor drives the view. A lens unfolds whatever dense region you point at,
+the camera eases in as you dwell, and everything semantically close to what you
+are looking at brightens and drifts toward you while the rest falls away.
 
 ## Run it
 
 ```sh
 npm install
-npm run index   # first run downloads a ~25MB embedding model, then ~3 min for 100 transcripts
+npm run index   # first run downloads a ~25MB embedding model, then ~5 min for 100 transcripts
 npm run dev     # http://localhost:5173
 ```
 
 `npm run index` is optional — the UI offers to build the index on first load.
-Re-running it is cheap: vectors are content-addressed, so only new conversation
-is embedded.
+Re-running it is cheap (~10s): vectors are content-addressed, so only new
+conversation is embedded.
 
 ## What you are looking at
 
@@ -37,8 +38,11 @@ long one, a tool call, or a tool result.
 | green | a tool call |
 | slate | a tool result |
 
-Faint filaments join consecutive points of the same session, so a single
-conversation reads as a thread wandering through the semantic space.
+A turn that has just arrived flares white and settles over about twelve
+seconds, so motion in the view means work happening this minute. A ringed label
+marks each running session — pinging while turns are landing, quiet when the
+session is idle — and the **working now** panel spells out what each one is
+doing in words.
 
 ### Controls
 
@@ -48,10 +52,13 @@ conversation reads as a thread wandering through the semantic space.
   in meaning
 - **search** — free-text query, embedded and projected into the same space; the
   cloud re-lights around it and the camera flies to the match cluster
-- **layout** — *semantic* (meaning), *time* (a helix of sessions in order), or
-  *project* (a skyline grouped by repo)
+- **layout** — *semantic* (a constellation of conversations, placed by what they
+  are about), *time* (a helix of sessions in order), or *project* (a skyline
+  grouped by repo)
 - **colour** — by kind, by session, or by recency
 - **lens / focus** — magnification strength and radius
+- **follow live** — open on, and fly to, the conversations that are running
+- **live only** — hide the archive entirely
 - **adaptive zoom** — toggle the cursor-driven camera; scrolling always wins for
   a moment afterwards
 
@@ -59,14 +66,22 @@ conversation reads as a thread wandering through the semantic space.
 
 ```
 ~/.claude/projects/**/*.jsonl
-  └─ transcripts.js   parse into sessions + points
-     └─ embed.js      all-MiniLM-L6-v2 via transformers.js, content-addressed cache
-        └─ layout.js  randomized PCA -> LSH kNN -> UMAP-style SGD in 3D
-           └─ web/    three.js point cloud; lens + semantic gravity in the vertex shader
+  ├─ transcripts.js   parse into sessions + points
+  │   └─ embed.js     all-MiniLM-L6-v2 via transformers.js, content-addressed cache
+  │      └─ layout.js randomized PCA -> LSH kNN -> UMAP-style SGD, per conversation
+  │         └─ web/   three.js point cloud; lens + semantic gravity in the vertex shader
+  └─ live.js          tails running sessions, projects each new turn into the
+                      same space, streams it over SSE
 ```
 
+The semantic layout is deliberately two-level. Laying out every point at once
+would interleave unrelated sessions, so a dense region could mix half a dozen
+conversations and read as one thing. Instead each conversation is laid out on
+its own and becomes a discrete island; the islands are positioned by the
+similarity of their centroids and pushed apart until none overlap.
+
 `scan.js` separately walks `ps`, resolves each process's cwd via `lsof`, and
-matches it to a transcript.
+matches it to the transcript it is writing.
 
 Everything runs locally. No conversation text leaves the machine — the model
 runs on-device and the API binds to `127.0.0.1`. The index lives in `.cache/`,
@@ -78,11 +93,16 @@ which is gitignored.
 | --- | --- |
 | `server/transcripts.js` | JSONL parsing, point extraction |
 | `server/scan.js` | live process discovery |
+| `server/live.js` | tails running sessions, projects new turns |
 | `server/embed.js` | on-device embeddings + vector cache |
-| `server/layout.js` | PCA, approximate kNN, 3D layout |
+| `server/layout.js` | PCA, approximate kNN, per-conversation island layout |
 | `server/build.js` | index builder |
-| `server/index.js` | HTTP API |
+| `server/index.js` | HTTP API + SSE stream |
 | `web/src/cloud.js` | three.js scene and shaders |
-| `web/src/main.js` | picking, focus, adaptive camera |
+| `web/src/live.js` | growable point store, live feed |
+| `web/src/main.js` | picking, focus, adaptive camera, labels |
 | `web/src/layouts.js` | time and project arrangements |
 | `web/src/ui.js` | panels |
+
+`window.__nebula` exposes `{ state, cloud, frame }` in the browser console for
+poking at the view.

@@ -59,6 +59,8 @@ export class UI {
     $('lens').oninput = (e) => { this.h.cloud.uniforms.uLensStrength.value = Number(e.target.value) }
     $('radius').oninput = (e) => { this.h.cloud.uniforms.uLensRadius.value = Number(e.target.value) }
     $('adaptive').onchange = (e) => { this.state.adaptive = e.target.checked }
+    $('follow').onchange = (e) => { this.state.followLive = e.target.checked }
+    $('liveonly').onchange = (e) => { this.state.liveOnly = e.target.checked }
     $('detail-close').onclick = () => this.closeDetail()
 
     $('legend').innerHTML = KIND_NAMES.map(
@@ -143,26 +145,65 @@ export class UI {
     $('detail').hidden = false
   }
 
-  processes(list) {
+  /** Floating markers over the conversations that are running right now. */
+  labels(items) {
+    const host = $('labels')
+    const html = items
+      .map(
+        (l) => `<div class="lab" style="left:${l.x.toFixed(0)}px;top:${l.y.toFixed(0)}px">
+          <div class="ring ${l.busy ? 'busy' : ''}"></div>
+          <div class="name">${esc(l.name)}</div>
+          <div class="act">${esc(l.act || '')}</div>
+        </div>`
+      )
+      .join('')
+    if (html !== this._labelHtml) {
+      host.innerHTML = html
+      this._labelHtml = html
+    }
+  }
+
+  liveState(connected) {
+    $('live-dot').classList.toggle('live', connected !== false)
+  }
+
+  /** One turn just landed: refresh the row for that conversation immediately. */
+  activity(msg, activity) {
+    this.liveState(true)
+    this._activity = activity
+    if (this._procs) this.processes(this._procs, activity)
+  }
+
+  processes(list, activity = this._activity || new Map()) {
+    this._procs = list
+    this._activity = activity
     const sessions = list.filter((p) => p.role === 'session')
     const support = list.filter((p) => p.role !== 'session')
-    const rows = sessions.map((p) => {
-      const known = !!p.sessionId
-      return `<li class="${known ? 'linked' : ''}" data-sid="${p.sessionId || ''}">
-        <span class="dot ${p.live ? 'live' : ''}"></span><span class="pid">${p.pid}</span>
-        ${esc((p.cwd || '?').split('/').pop())}
-        <div class="meta">up ${dur(p.uptimeSec)} · ${num(Math.round(p.rssKb / 1024))}MB${
-          known ? ` · transcript ${p.transcriptAgeSec < 90 ? 'active' : ago(Date.now() - p.transcriptAgeSec * 1000)}` : ' · no transcript'
-        }</div>
-      </li>`
-    })
+
+    const rows = sessions
+      .sort((a, b) => (b.live ? 1 : 0) - (a.live ? 1 : 0))
+      .map((p) => {
+        const act = p.sessionId ? activity.get(p.sessionId) : null
+        const what = act
+          ? `<div class="doing"><b>${esc(act.tool || KIND_NAMES[['user','assistant','thinking','tool','result'].indexOf(act.kind)] || act.kind)}</b> ${esc(
+              act.snippet.slice(0, 120)
+            )}…</div>`
+          : '<div class="meta idle">no new turns since you opened this</div>'
+        return `<li class="${p.sessionId ? 'linked' : ''}" data-sid="${p.sessionId || ''}">
+          <span class="dot ${p.live ? 'live' : ''}"></span><span class="pid">${p.pid}</span>
+          ${esc((p.cwd || '?').split('/').pop())}
+          ${what}
+          <div class="meta">up ${dur(p.uptimeSec)} · ${num(Math.round(p.rssKb / 1024))}MB${
+            act ? ` · ${ago(act.at)}` : ''
+          }</div>
+        </li>`
+      })
+
     if (support.length) {
       const by = support.reduce((m, p) => ((m[p.role] = (m[p.role] || 0) + 1), m), {})
-      rows.push(
-        `<li><div class="meta">${Object.entries(by).map(([k, v]) => `${v}× ${k}`).join(' · ')}</div></li>`
-      )
+      rows.push(`<li><div class="meta">${Object.entries(by).map(([k, v]) => `${v}× ${k}`).join(' · ')}</div></li>`)
     }
-    $('proc-list').innerHTML = rows.join('') || '<li class="meta">no claude processes</li>'
+    $('proc-list').innerHTML = rows.join('') || '<li class="meta">no claude sessions running</li>'
     for (const el of $('proc-list').querySelectorAll('[data-sid]'))
       if (el.dataset.sid) el.onclick = () => this.h.onSelectSession(el.dataset.sid)
   }

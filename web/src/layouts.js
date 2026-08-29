@@ -14,20 +14,20 @@ export function timeLayout(meta, cols) {
   for (let i = 0; i < n; i++) counts[cols.session[i]]++
 
   const TURNS = 3.2
+  const R = 34
   for (let i = 0; i < n; i++) {
     const s = cols.session[i]
     const u = rank.get(s) / Math.max(1, meta.sessions.length - 1)
     const a = u * TURNS * Math.PI * 2
-    const R = 58
-    const cx = Math.cos(a) * R, cz = Math.sin(a) * R, cy = (u - 0.5) * 96
+    const cx = Math.cos(a) * R, cz = Math.sin(a) * R, cy = (u - 0.5) * 62
     // Tangent of the spiral, so a conversation reads left-to-right along it.
     const tx = -Math.sin(a), tz = Math.cos(a)
     const j = seen[s]++
     const m = Math.max(1, counts[s] - 1)
-    const along = (j / m - 0.5) * Math.min(26, 3 + counts[s] * 0.22)
+    const along = (j / m - 0.5) * Math.min(17, 2 + counts[s] * 0.15)
     const twist = j * 0.55
-    out[i * 3] = cx + tx * along + Math.cos(twist) * 3.4
-    out[i * 3 + 1] = cy + Math.sin(twist) * 3.4
+    out[i * 3] = cx + tx * along + Math.cos(twist) * 2.4
+    out[i * 3 + 1] = cy + Math.sin(twist) * 2.4
     out[i * 3 + 2] = cz + tz * along
   }
   return out
@@ -66,21 +66,32 @@ export function projectLayout(meta, cols) {
     const s = cols.session[i]
     const [x, y, z] = slot.get(s) || [0, 0, 0]
     const j = seen[s]++
-    const h = Math.log2(counts[s] + 1) * 9
+    const h = Math.log2(counts[s] + 1) * 7
     const t = j / Math.max(1, counts[s] - 1)
-    out[i * 3] = x + Math.cos(j * 1.1) * 0.5
-    out[i * 3 + 1] = y - 24 + t * h
-    out[i * 3 + 2] = z + Math.sin(j * 1.1) * 0.5
+    // A column, not a wire: points wind around the session's axis so a busy
+    // conversation reads as a thicker pillar.
+    const w = 0.6 + 1.3 * Math.sqrt(t)
+    out[i * 3] = x + Math.cos(j * GOLDEN) * w
+    out[i * 3 + 1] = y - 18 + t * h
+    out[i * 3 + 2] = z + Math.sin(j * GOLDEN) * w
   }
   return out
 }
 
-/** Line segments joining consecutive points within each conversation. */
-export function threadSegments(pos, cols) {
+/**
+ * Line segments joining consecutive points within each conversation. Jumps
+ * across the whole cloud are dropped: they say nothing about local structure
+ * and would otherwise draw a web of long chords over everything.
+ */
+export function threadSegments(pos, cols, maxLen = 16) {
   const n = cols.session.length
   const segs = []
+  const max2 = maxLen * maxLen
   for (let i = 1; i < n; i++) {
     if (cols.session[i] !== cols.session[i - 1]) continue
+    const a = (i - 1) * 3, b = i * 3
+    const d2 = (pos[a] - pos[b]) ** 2 + (pos[a + 1] - pos[b + 1]) ** 2 + (pos[a + 2] - pos[b + 2]) ** 2
+    if (d2 > max2) continue
     segs.push(pos[(i - 1) * 3], pos[(i - 1) * 3 + 1], pos[(i - 1) * 3 + 2], pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2])
   }
   return new Float32Array(segs)

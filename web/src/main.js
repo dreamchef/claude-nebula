@@ -2,6 +2,9 @@ import * as THREE from 'three'
 import { Cloud, KIND_COLORS } from './cloud.js'
 import { timeLayout, projectLayout, threadSegments } from './layouts.js'
 import { UI } from './ui.js'
+import { LiveFeed, PointStore } from './live.js'
+
+const SPARE = 24000 // room for live turns to land in
 
 const api = (p, opt) => fetch(`/api${p}`, opt)
 const bin = async (name, Type) => new Type(await (await api(`/cloud/${name}`)).arrayBuffer())
@@ -22,10 +25,16 @@ const state = {
   query: null,
   selSession: -1,
   lastUserZoom: 0,
+  followLive: true,
+  liveOnly: false,
+  store: null,
 }
 
 const ui = new UI(state)
 const cloud = new Cloud(document.getElementById('stage'))
+
+// Handy from the console when tuning the view.
+window.__nebula = { state, cloud, frame }
 
 /* ---------- boot ---------- */
 
@@ -74,14 +83,30 @@ async function load() {
     bin('len.bin', Int32Array),
     bin('flags.bin', Uint8Array),
   ])
-  state.cols = { session, seq, kind, time, tool, len, flags }
-  state.sim = sim
-  state.pos = pos
 
   ui.bootMessage('arranging…', 0.6)
   const n = kind.length
-  const posTime = timeLayout(meta, state.cols)
-  const posProj = projectLayout(meta, state.cols)
+  const cap = n + SPARE
+
+  // Everything is over-allocated so live turns append in place.
+  const grow = (Type, src, stride = 1) => {
+    const a = new Type(cap * stride)
+    a.set(src.subarray ? src.subarray(0, n * stride) : src)
+    return a
+  }
+  const cols = {
+    session: grow(Int32Array, session),
+    seq: grow(Int32Array, seq),
+    kind: grow(Uint8Array, kind),
+    time: grow(Float64Array, time),
+    tool: grow(Int16Array, tool),
+    len: grow(Int32Array, len),
+    flags: grow(Uint8Array, flags),
+  }
+  state.cols = cols
+
+  const posTime = timeLayout(meta, { session, kind })
+  const posProj = projectLayout(meta, { session, kind })
 
   let tmin = Infinity, tmax = -Infinity
   for (let i = 0; i < n; i++) {
@@ -92,25 +117,62 @@ async function load() {
   }
   const span = Math.max(1, tmax - tmin)
 
-  const hue = new Float32Array(n)
-  const age = new Float32Array(n)
-  const weight = new Float32Array(n)
-  const sessionF = new Float32Array(n)
+  const arrays = {
+    position: { array: grow(Float32Array, pos, 3), size: 3 },
+    aPosTime: { array: grow(Float32Array, posTime, 3), size: 3 },
+    aPosProj: { array: grow(Float32Array, posProj, 3), size: 3 },
+    aKind: { array: new Float32Array(cap), size: 1 },
+    aHue: { array: new Float32Array(cap), size: 1 },
+    aAge: { array: new Float32Array(cap), size: 1 },
+    aWeight: { array: new Float32Array(cap), size: 1 },
+    aSession: { array: new Float32Array(cap), size: 1 },
+    aBorn: { array: new Float32Array(cap), size: 1 },
+    aLive: { array: new Float32Array(cap), size: 1 },
+  }
   for (let i = 0; i < n; i++) {
-    hue[i] = ((session[i] * 0.61803398875) % 1 + 1) % 1
-    age[i] = time[i] ? (time[i] - tmin) / span : 0
-    weight[i] = Math.min(1, Math.log2(len[i] + 2) / 14)
-    sessionF[i] = session[i]
+    arrays.aKind.array[i] = kind[i]
+    arrays.aHue.array[i] = ((session[i] * 0.61803398875) % 1 + 1) % 1
+    arrays.aAge.array[i] = time[i] ? (time[i] - tmin) / span : 0
+    arrays.aWeight.array[i] = Math.min(1, Math.log2(len[i] + 2) / 14)
+    arrays.aSession.array[i] = session[i]
   }
 
-  cloud.setData({ pos, posTime, posProj, kind: new Float32Array(kind), hue, age, weight, session: sessionF })
-  cloud.setThreads(threadSegments(pos, state.cols))
-  state.layouts = [pos, posTime, posProj]
+  state.sim = grow(Float32Array, sim, meta.simDim)
 
+  cloud.setData(arrays, n, cap)
+  cloud.setThreads(threadSegments(pos, { session }))
+  state.arrays = arrays
+  state.layouts = [arrays.position.array, arrays.aPosTime.array, arrays.aPosProj.array]
+
+  state.store = new PointStore(meta, cols, arrays, state.sim, n, cap)
   ui.ready(meta)
   animate()
-  api('/cloud/snippets.json').then((r) => r.json()).then((s) => { state.snippets = s })
-  pollProcesses()
+
+  api('/cloud/snippets.json').then((r) => r.json()).then((sn) => {
+    sn.length = Math.max(sn.length, n)
+    state.snippets = sn
+    state.store.snippets = sn
+  })
+
+  new LiveFeed(state.store, {
+    onProcesses: (procs, activity) => {
+      state.liveActivity = activity
+      ui.processes(procs, activity)
+      cloud.grow(state.store.count)
+      frameLive()
+    },
+    onPoints: (msg, added, activity) => {
+      cloud.grow(state.store.count)
+      state.liveActivity = activity
+      ui.activity(msg, activity)
+      updateLabels(true)
+      if (state.followLive && added.length) {
+        worldPos(added[added.length - 1], _v)
+        state.flyTo = _v.clone()
+      }
+    },
+    onDisconnect: () => ui.liveState(false),
+  }).connect()
 }
 
 /* ---------- cursor focus ---------- */
@@ -134,6 +196,7 @@ document.getElementById('stage').addEventListener('pointerup', (e) => {
 })
 
 const _v = new THREE.Vector3()
+const HOME = new THREE.Vector3(0, 0, 0)
 const weights = new THREE.Vector3(1, 0, 0)
 const targetWeights = new THREE.Vector3(1, 0, 0)
 
@@ -166,7 +229,7 @@ const smoothstep = (a, b, x) => {
 
 let pickAcc = 0
 function pick() {
-  const n = state.cols.kind.length
+  const n = state.store ? state.store.count : 0
   const mvp = new THREE.Matrix4().multiplyMatrices(cloud.camera.projectionMatrix, cloud.camera.matrixWorldInverse)
   let best = -1, bestScore = Infinity
   const RADIUS = 0.055 // in NDC
@@ -186,7 +249,7 @@ function pick() {
 
 function relevanceFrom(vec) {
   const { sim, simDim } = state
-  const n = cloud.rel.length
+  const n = state.store.count
   const rel = cloud.rel
   for (let i = 0; i < n; i++) {
     let d = 0
@@ -216,7 +279,7 @@ export function applyQuery(vector) {
 
 function flyToMatches() {
   const rel = cloud.rel
-  const idx = [...rel.keys()].sort((a, b) => rel[b] - rel[a]).slice(0, 40)
+  const idx = Array.from({ length: state.store.count }, (_, i) => i).sort((a, b) => rel[b] - rel[a]).slice(0, 40)
   const c = new THREE.Vector3()
   const p = new THREE.Vector3()
   for (const i of idx) c.add(worldPos(i, p))
@@ -234,17 +297,17 @@ const LAYOUT_TARGETS = [
 ]
 
 let last = performance.now()
-function animate() {
-  requestAnimationFrame(animate)
-  const now = performance.now()
-  const dt = Math.min(0.05, (now - last) / 1000)
-  last = now
+
+/** One simulation + render step. Split out from the rAF driver so the view can
+ *  be advanced deterministically (tests, headless capture). */
+function frame(dt, now = performance.now()) {
 
   targetWeights.set(...LAYOUT_TARGETS[state.layout])
   weights.lerp(targetWeights, 1 - Math.pow(0.002, dt))
   cloud.uniforms.uWeights.value.copy(weights)
   cloud.uniforms.uColorMode.value = state.colorMode
   cloud.uniforms.uSelSession.value = state.selSession
+  cloud.uniforms.uLiveOnly.value = state.liveOnly ? 1 : 0
 
   pickAcc += dt
   if (pickAcc > 0.045 && state.layouts) {
@@ -271,23 +334,94 @@ function animate() {
   state.relActive += (state.relTarget - state.relActive) * (1 - Math.pow(0.02, dt))
   cloud.uniforms.uRelActive.value = state.relActive
 
-  // Adaptive zoom: dwelling draws the camera in toward the focus; moving the
-  // cursor around pulls it back out to keep the whole cloud in view.
+  // Adaptive zoom: dwelling on a point draws the camera in toward it; with
+  // nothing under the cursor the view eases back out to frame the whole cloud.
   if (state.adaptive && now - state.lastUserZoom > 1200) {
     const ctl = cloud.controls
-    const dwell = (now - Math.max(dwellAt, mouseMovedAt)) / 1000
     const dir = cloud.camera.position.clone().sub(ctl.target)
     const dist = dir.length()
-    const want = state.flyTo ? 42 : state.hover >= 0 ? THREE.MathUtils.lerp(dist, 26, Math.min(1, dwell * 0.5)) : Math.min(150, dist * 1.006)
-    const k = 1 - Math.pow(0.25, dt)
-    const goal = state.flyTo || (state.hover >= 0 ? focus : null)
-    if (goal) ctl.target.lerp(goal, k * 0.55)
-    dir.setLength(THREE.MathUtils.lerp(dist, THREE.MathUtils.clamp(want, 9, 220), k * 0.5))
+    const k = 1 - Math.pow(0.3, dt)
+    let goal, want
+    if (state.flyTo) {
+      goal = state.flyTo
+      want = 46
+    } else if (state.hover >= 0) {
+      goal = focus
+      want = THREE.MathUtils.lerp(dist, 34, Math.min(1, ((now - dwellAt) / 1000) * 0.22))
+    } else {
+      goal = HOME
+      want = THREE.MathUtils.lerp(dist, 92, 0.03)
+    }
+    ctl.target.lerp(goal, k * 0.3)
+    dir.setLength(THREE.MathUtils.lerp(dist, THREE.MathUtils.clamp(want, 18, 240), k * 0.35))
     cloud.camera.position.copy(ctl.target).add(dir)
-    if (state.flyTo && cloud.camera.position.distanceTo(state.flyTo) < 60) state.flyTo = null
+    if (state.flyTo && cloud.camera.position.distanceTo(state.flyTo) < 70) state.flyTo = null
   }
 
+  updateLabels()
   cloud.render(dt)
+}
+
+const _l = new THREE.Vector3()
+let labelAcc = 0
+
+/** Screen-space markers for the conversations that are running right now. */
+function updateLabels(force) {
+  const store = state.store
+  if (!store) return
+  labelAcc += 1
+  if (!force && labelAcc % 6) return
+  const items = []
+  for (const sessionId of store.liveSessions) {
+    const idx = store.indexOfSession.get(sessionId)
+    if (idx === undefined) continue
+    const island = store.island.get(idx)
+    if (!island) continue
+    _l.set(island.center[0], island.center[1] + island.radius + 2, island.center[2]).project(cloud.camera)
+    if (_l.z < -1 || _l.z > 1) continue
+    const s = state.meta.sessions[idx]
+    const act = state.liveActivity?.get(sessionId)
+    items.push({
+      x: (_l.x * 0.5 + 0.5) * innerWidth,
+      y: (-_l.y * 0.5 + 0.5) * innerHeight,
+      name: (s.projectPath || '').split('/').pop() || s.sessionId.slice(0, 8),
+      act: act ? `${act.tool || act.kind} · ${act.snippet.slice(0, 46)}…` : '',
+      // Ping only while turns are actually landing; a session sitting idle
+      // should not read as busy.
+      busy: !!act && Date.now() - act.at < 60_000,
+    })
+  }
+  ui.labels(items)
+}
+
+function animate() {
+  requestAnimationFrame(animate)
+  const now = performance.now()
+  const dt = Math.min(0.05, (now - last) / 1000)
+  last = now
+  frame(dt, now)
+}
+
+/** Opens on the work in progress: frame the running conversations. */
+let framedLive = false
+function frameLive() {
+  const store = state.store
+  if (!store || framedLive || !state.followLive) return
+  const centers = []
+  for (const sessionId of store.liveSessions) {
+    const idx = store.indexOfSession.get(sessionId)
+    const island = idx !== undefined && store.island.get(idx)
+    if (island) centers.push(island)
+  }
+  if (!centers.length) return
+  framedLive = true
+  const c = new THREE.Vector3()
+  for (const i of centers) c.add(new THREE.Vector3(...i.center))
+  c.divideScalar(centers.length)
+  let span = 0
+  for (const i of centers) span = Math.max(span, c.distanceTo(new THREE.Vector3(...i.center)) + i.radius)
+  cloud.controls.target.copy(c)
+  cloud.camera.position.copy(c).add(new THREE.Vector3(0, span * 0.5 + 8, span * 2.2 + 34))
 }
 
 /* ---------- panels ---------- */
@@ -300,7 +434,7 @@ function pin(i) {
 
 function nearest(i, k) {
   const { sim, simDim } = state
-  const n = cloud.rel.length
+  const n = state.store.count
   const scores = new Float32Array(n)
   const o = i * simDim
   for (let j = 0; j < n; j++) {
@@ -310,15 +444,7 @@ function nearest(i, k) {
     for (let c = 0; c < simDim; c++) d += sim[o + c] * sim[jo + c]
     scores[j] = d
   }
-  return [...scores.keys()].sort((a, b) => scores[b] - scores[a]).slice(0, k)
-}
-
-async function pollProcesses() {
-  try {
-    const { processes } = await (await api('/processes')).json()
-    ui.processes(processes)
-  } catch {}
-  setTimeout(pollProcesses, 4000)
+  return Array.from({ length: n }, (_, i) => i).sort((a, b) => scores[b] - scores[a]).slice(0, k)
 }
 
 ui.bind({
@@ -343,4 +469,9 @@ ui.bind({
   KIND_COLORS,
 })
 
-boot()
+addEventListener('unhandledrejection', (e) => ui.bootMessage(`failed: ${e.reason?.message || e.reason}`, 0))
+
+boot().catch((e) => {
+  console.error(e)
+  ui.bootMessage(`failed: ${e.message}`, 0)
+})

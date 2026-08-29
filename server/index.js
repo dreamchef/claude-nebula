@@ -6,9 +6,16 @@ import { build, loadBuilt, CLOUD_DIR, SIM_DIM } from './build.js'
 import { scanProcesses } from './scan.js'
 import { embedOne, DIM } from './embed.js'
 import { listTranscripts, readTranscript } from './transcripts.js'
+import { LiveTail } from './live.js'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const PORT = Number(process.env.PORT || 5174)
+
+/** readFileSync hands back pooled Buffers, so a view must respect byteOffset. */
+function readF32(file) {
+  const b = fs.readFileSync(file)
+  return new Float32Array(b.buffer, b.byteOffset, b.byteLength / 4)
+}
 
 const app = express()
 app.use(express.json({ limit: '1mb' }))
@@ -63,8 +70,8 @@ app.post('/api/search', async (req, res) => {
   if (!fs.existsSync(meanFile)) return res.status(409).json({ error: 'not indexed' })
   try {
     const vec = await embedOne(q)
-    const mean = new Float32Array(fs.readFileSync(meanFile).buffer)
-    const comp = new Float32Array(fs.readFileSync(path.join(CLOUD_DIR, 'pca-comp.bin')).buffer)
+    const mean = readF32(meanFile)
+    const comp = readF32(path.join(CLOUD_DIR, 'pca-comp.bin'))
     const out = new Float32Array(SIM_DIM)
     for (let d = 0; d < DIM; d++) {
       const v = vec[d] - mean[d]
@@ -86,6 +93,36 @@ app.get('/api/session/:id', async (req, res) => {
   if (!t) return res.status(404).json({ error: 'no such session' })
   const { session, points } = await readTranscript(t)
   res.json({ session: { ...session, file: undefined }, points })
+})
+
+/**
+ * Server-sent stream of what the machine is doing right now: new conversation
+ * turns as they are written, plus the live process roster.
+ */
+const tail = new LiveTail().start()
+
+app.get('/api/live', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  })
+  const send = (event, data) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+  send('hello', { at: Date.now() })
+
+  const onPoints = (p) => send('points', p)
+  const onProcs = (p) => send('processes', { at: Date.now(), processes: p })
+  tail.on('points', onPoints)
+  tail.on('processes', onProcs)
+  scanProcesses().then(onProcs).catch(() => {})
+
+  const beat = setInterval(() => res.write(': ping\n\n'), 20000)
+  req.on('close', () => {
+    clearInterval(beat)
+    tail.off('points', onPoints)
+    tail.off('processes', onProcs)
+  })
 })
 
 const dist = path.join(ROOT, 'dist')

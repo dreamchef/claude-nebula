@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Point-cloud visualizer for every Claude Code conversation on your machine",
+  "description": "Live point-cloud view of what every Claude Code session on your machine is doing",
   "scripts": {
     "dev": "concurrently -n api,web -c cyan,magenta \"node server/index.js\" \"vite\"",
     "index": "node server/cli-index.js",

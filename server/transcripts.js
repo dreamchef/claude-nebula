@@ -91,6 +91,53 @@ function chunks(text) {
 }
 
 /**
+ * Turns one transcript entry into its points: a text block, a thinking block,
+ * a tool call, or a chunk of a long tool result. Shared by the batch indexer
+ * and the live tail so both see conversation the same way.
+ */
+export function extractPoints(e, seqStart = 0) {
+  const msg = e.message
+  if (!msg) return []
+  const ts = e.timestamp ? Date.parse(e.timestamp) : null
+  const blocks = Array.isArray(msg.content)
+    ? msg.content
+    : typeof msg.content === 'string'
+      ? [{ type: 'text', text: msg.content }]
+      : []
+
+  const out = []
+  let seq = seqStart
+  for (const b of blocks) {
+    const btype = typeof b === 'string' ? 'text' : b?.type
+    let kind
+    if (btype === 'thinking' || btype === 'redacted_thinking') kind = 'thinking'
+    else if (btype === 'tool_use') kind = 'tool'
+    else if (btype === 'tool_result') kind = 'result'
+    else if (btype === 'text') kind = e.type === 'user' ? 'user' : 'assistant'
+    else continue
+
+    const raw = textOf(b)
+    const parts = chunks(raw)
+    for (let ci = 0; ci < parts.length; ci++) {
+      out.push({
+        seq: seq++,
+        kind,
+        t: ts,
+        tool: btype === 'tool_use' ? b.name : null,
+        error: btype === 'tool_result' && b.is_error ? 1 : 0,
+        uuid: e.uuid || null,
+        chunk: ci,
+        chunks: parts.length,
+        len: raw.length,
+        text: parts[ci],
+        snippet: parts[ci].slice(0, SNIPPET),
+      })
+    }
+  }
+  return out
+}
+
+/**
  * Reads one transcript into a session record plus a flat list of points.
  * A point is one semantically coherent slice of the conversation: a text
  * block, a thinking block, a tool call, or a tool result chunk.
@@ -146,6 +193,8 @@ export async function readTranscript(meta) {
 
     const msg = e.message
     if (!msg) continue
+    if (Array.isArray(msg.content))
+      for (const b of msg.content) if (b?.type === 'tool_use') session.toolCalls++
 
     if (e.type === 'assistant') {
       session.assistantTurns++
@@ -163,38 +212,9 @@ export async function readTranscript(meta) {
       if (human) session.userTurns++
     }
 
-    const blocks = Array.isArray(msg.content)
-      ? msg.content
-      : typeof msg.content === 'string'
-        ? [{ type: 'text', text: msg.content }]
-        : []
-
-    for (const b of blocks) {
-      const btype = typeof b === 'string' ? 'text' : b?.type
-      let kind
-      if (btype === 'thinking' || btype === 'redacted_thinking') kind = 'thinking'
-      else if (btype === 'tool_use') { kind = 'tool'; session.toolCalls++ }
-      else if (btype === 'tool_result') kind = 'result'
-      else if (btype === 'text') kind = e.type === 'user' ? 'user' : 'assistant'
-      else continue
-
-      const raw = textOf(b)
-      const parts = chunks(raw)
-      for (let ci = 0; ci < parts.length; ci++) {
-        points.push({
-          seq: seq++,
-          kind,
-          t: ts,
-          tool: btype === 'tool_use' ? b.name : null,
-          error: btype === 'tool_result' && b.is_error ? 1 : 0,
-          uuid: e.uuid || null,
-          chunk: ci,
-          chunks: parts.length,
-          len: raw.length,
-          text: parts[ci],
-          snippet: parts[ci].slice(0, SNIPPET),
-        })
-      }
+    for (const p of extractPoints(e, seq)) {
+      points.push(p)
+      seq++
     }
   }
 
