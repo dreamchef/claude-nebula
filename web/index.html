@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Nebula — Claude conversation point cloud</title>
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="stage"></canvas>
+
+    <div id="boot" class="boot">
+      <div class="boot-inner">
+        <h1>nebula</h1>
+        <p id="boot-msg">connecting…</p>
+        <div class="bar"><i id="boot-bar"></i></div>
+        <button id="boot-build" hidden>Build index</button>
+      </div>
+    </div>
+
+    <header id="hud-top" class="panel" hidden>
+      <div class="brand">nebula</div>
+      <div class="search">
+        <input id="q" type="search" placeholder="what are you looking for?" autocomplete="off" spellcheck="false" />
+        <button id="q-clear" title="clear" hidden>×</button>
+      </div>
+      <div id="stats" class="stats"></div>
+    </header>
+
+    <aside id="procs" class="panel side" hidden>
+      <h2>live processes</h2>
+      <ul id="proc-list"></ul>
+    </aside>
+
+    <aside id="detail" class="panel side right" hidden>
+      <button id="detail-close" title="close">×</button>
+      <div id="detail-body"></div>
+    </aside>
+
+    <footer id="controls" class="panel" hidden>
+      <label class="seg">
+        layout
+        <span class="segbtns">
+          <button data-layout="0" class="on">semantic</button>
+          <button data-layout="1">time</button>
+          <button data-layout="2">project</button>
+        </span>
+      </label>
+      <label class="seg">
+        colour
+        <span class="segbtns">
+          <button data-color="0" class="on">kind</button>
+          <button data-color="1">session</button>
+          <button data-color="2">recency</button>
+        </span>
+      </label>
+      <label class="slide">lens <input id="lens" type="range" min="0" max="1.6" step="0.02" value="0.85" /></label>
+      <label class="slide">focus <input id="radius" type="range" min="2" max="30" step="0.5" value="11" /></label>
+      <label class="check"><input id="adaptive" type="checkbox" checked /> adaptive zoom</label>
+      <div id="legend" class="legend"></div>
+    </footer>
+
+    <div id="tip" class="tip" hidden></div>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

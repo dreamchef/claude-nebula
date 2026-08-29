@@ -1,0 +1,22 @@
+{
+  "name": "claude-nebula",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Point-cloud visualizer for every Claude Code conversation on your machine",
+  "scripts": {
+    "dev": "concurrently -n api,web -c cyan,magenta \"node server/index.js\" \"vite\"",
+    "index": "node server/cli-index.js",
+    "start": "node server/index.js",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.3.3",
+    "express": "^4.21.2",
+    "three": "^0.172.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "vite": "^6.0.7"
+  }
+}
