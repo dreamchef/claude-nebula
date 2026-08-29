@@ -25,6 +25,8 @@ const state = {
   query: null,
   selSession: -1,
   lastUserZoom: 0,
+  home: { target: new THREE.Vector3(0, 0, 0), dist: 92 },
+  manual: false,
   followLive: true,
   liveOnly: false,
   store: null,
@@ -166,10 +168,7 @@ async function load() {
       state.liveActivity = activity
       ui.activity(msg, activity)
       updateLabels(true)
-      if (state.followLive && added.length) {
-        worldPos(added[added.length - 1], _v)
-        state.flyTo = _v.clone()
-      }
+      followLive(msg, added)
     },
     onDisconnect: () => ui.liveState(false),
   }).connect()
@@ -180,14 +179,35 @@ async function load() {
 const mouse = new THREE.Vector2(-2, -2)
 let mouseMovedAt = 0
 let dwellAt = 0
+let cursorMoved = false
+let settled = false
 
 addEventListener('pointermove', (e) => {
-  mouse.x = (e.clientX / innerWidth) * 2 - 1
-  mouse.y = -(e.clientY / innerHeight) * 2 + 1
+  const x = (e.clientX / innerWidth) * 2 - 1
+  const y = -(e.clientY / innerHeight) * 2 + 1
+  // Sub-pixel noise is not movement; a resting hand must read as at rest.
+  if (Math.abs(x - mouse.x) < 1e-4 && Math.abs(y - mouse.y) < 1e-4) return
+  mouse.x = x
+  mouse.y = y
+  cursorMoved = true
+  state.manual = false // the cursor is driving again
   ui.cursor(e.clientX, e.clientY)
   mouseMovedAt = performance.now()
 })
 addEventListener('wheel', () => { state.lastUserZoom = performance.now() }, { passive: true })
+
+// Navigating by hand sticks: adopt wherever the user left the camera as the
+// resting pose, and stay out of the way until the cursor drives again.
+cloud.controls.addEventListener('start', () => {
+  state.lastUserZoom = performance.now()
+  state.manual = true
+  settled = false
+})
+cloud.controls.addEventListener('end', () => {
+  state.lastUserZoom = performance.now()
+  state.home.target.copy(cloud.controls.target)
+  state.home.dist = cloud.camera.position.distanceTo(cloud.controls.target)
+})
 document.getElementById('stage').addEventListener('pointerdown', () => { state.downAt = performance.now() })
 document.getElementById('stage').addEventListener('pointerup', (e) => {
   if (performance.now() - (state.downAt || 0) > 240) return // a drag, not a pick
@@ -196,12 +216,17 @@ document.getElementById('stage').addEventListener('pointerup', (e) => {
 })
 
 const _v = new THREE.Vector3()
-const HOME = new THREE.Vector3(0, 0, 0)
 const weights = new THREE.Vector3(1, 0, 0)
 const targetWeights = new THREE.Vector3(1, 0, 0)
 
-/** Mirrors the vertex shader so screen-space picking hits what is actually drawn. */
-function worldPos(i, out) {
+/**
+ * Mirrors the vertex shader so screen-space picking hits what is actually
+ * drawn. `lens` is off when we need a point's settled position: the lens is
+ * centred on the focus, so feeding a lens-displaced position back in as the
+ * focus is circular — and at distance zero its direction is degenerate, which
+ * is enough to make a stationary view jitter.
+ */
+function worldPos(i, out, lens = true) {
   const [a, b, c] = state.layouts
   const o = i * 3
   let x = a[o] * weights.x + b[o] * weights.y + c[o] * weights.z
@@ -214,7 +239,9 @@ function worldPos(i, out) {
   const fx = f.uFocus.value
   x += (fx.x - x) * s; y += (fx.y - y) * s; z += (fx.z - z) * s
 
-  let dx = x - fx.x, dy = y - fx.y, dz = z - fx.z
+  if (!lens) return out.set(x, y, z)
+
+  const dx = x - fx.x, dy = y - fx.y, dz = z - fx.z
   const r = f.uLensRadius.value
   const dist = Math.hypot(dx, dy, dz) || 1e-4
   const g = Math.exp(-(dist * dist) / Math.max(r * r, 0.001)) * f.uLensStrength.value * r * 0.75
@@ -232,16 +259,22 @@ function pick() {
   const n = state.store ? state.store.count : 0
   const mvp = new THREE.Matrix4().multiplyMatrices(cloud.camera.projectionMatrix, cloud.camera.matrixWorldInverse)
   let best = -1, bestScore = Infinity
+  let heldScore = Infinity
   const RADIUS = 0.055 // in NDC
   for (let i = 0; i < n; i++) {
     worldPos(i, _v).applyMatrix4(mvp)
     if (_v.z < -1 || _v.z > 1) continue
     const dx = _v.x - mouse.x, dy = _v.y - mouse.y
     const d2 = dx * dx + dy * dy
+    if (i === state.hover) heldScore = d2 + _v.z * 0.004
     if (d2 > RADIUS * RADIUS) continue
     const score = d2 + _v.z * 0.004
     if (score < bestScore) { bestScore = score; best = i }
   }
+  // Keep the point we are already on unless a rival is clearly nearer, so
+  // neighbours in a dense cluster cannot trade the hover back and forth.
+  if (state.hover >= 0 && best !== state.hover && heldScore < RADIUS * RADIUS && bestScore > heldScore * 0.55)
+    return state.hover
   return best
 }
 
@@ -309,9 +342,15 @@ function frame(dt, now = performance.now()) {
   cloud.uniforms.uSelSession.value = state.selSession
   cloud.uniforms.uLiveOnly.value = state.liveOnly ? 1 : 0
 
+  // Picking runs only when the cursor has actually moved (or while a layout
+  // morph is still shifting points under it). The lens displaces points and
+  // picking reads those displaced positions, so re-picking under a stationary
+  // cursor would feed the view back into itself.
+  const morphing = weights.manhattanDistanceTo(targetWeights) > 0.002
   pickAcc += dt
-  if (pickAcc > 0.045 && state.layouts) {
+  if (state.layouts && (cursorMoved || morphing) && pickAcc > 0.045) {
     pickAcc = 0
+    cursorMoved = false
     const hit = pick()
     if (hit !== state.hover) {
       state.hover = hit
@@ -321,12 +360,13 @@ function frame(dt, now = performance.now()) {
     }
   }
 
-  // The lens follows the cursor: focus eases onto the hovered point, and the
-  // cloud's response ramps in with dwell so a fast sweep doesn't thrash.
+  // The lens follows the cursor. Focus tracks the hovered point's settled
+  // position and snaps once it arrives, so a still cursor leaves it still.
   const focus = cloud.uniforms.uFocus.value
   if (state.hover >= 0) {
-    worldPos(state.hover, _v)
-    focus.lerp(_v, 1 - Math.pow(0.001, dt))
+    worldPos(state.hover, _v, false)
+    if (focus.distanceToSquared(_v) < 1e-4) focus.copy(_v)
+    else focus.lerp(_v, 1 - Math.pow(0.001, dt))
     state.relTarget = state.query ? 1 : Math.min(1, (now - dwellAt) / 260)
   } else if (!state.query) {
     state.relTarget = 0
@@ -334,29 +374,7 @@ function frame(dt, now = performance.now()) {
   state.relActive += (state.relTarget - state.relActive) * (1 - Math.pow(0.02, dt))
   cloud.uniforms.uRelActive.value = state.relActive
 
-  // Adaptive zoom: dwelling on a point draws the camera in toward it; with
-  // nothing under the cursor the view eases back out to frame the whole cloud.
-  if (state.adaptive && now - state.lastUserZoom > 1200) {
-    const ctl = cloud.controls
-    const dir = cloud.camera.position.clone().sub(ctl.target)
-    const dist = dir.length()
-    const k = 1 - Math.pow(0.3, dt)
-    let goal, want
-    if (state.flyTo) {
-      goal = state.flyTo
-      want = 46
-    } else if (state.hover >= 0) {
-      goal = focus
-      want = THREE.MathUtils.lerp(dist, 34, Math.min(1, ((now - dwellAt) / 1000) * 0.22))
-    } else {
-      goal = HOME
-      want = THREE.MathUtils.lerp(dist, 92, 0.03)
-    }
-    ctl.target.lerp(goal, k * 0.3)
-    dir.setLength(THREE.MathUtils.lerp(dist, THREE.MathUtils.clamp(want, 18, 240), k * 0.35))
-    cloud.camera.position.copy(ctl.target).add(dir)
-    if (state.flyTo && cloud.camera.position.distanceTo(state.flyTo) < 70) state.flyTo = null
-  }
+  updateCamera(dt, now, focus)
 
   updateLabels()
   cloud.render(dt)
@@ -402,6 +420,83 @@ function animate() {
   frame(dt, now)
 }
 
+/**
+ * Where the camera wants to be, as a function of what is under the cursor
+ * right now — never of how long it has been there. A pose that integrated
+ * dwell time would keep creeping while the cursor sat still.
+ */
+function desiredPose(focus, out) {
+  if (state.flyTo) {
+    out.target.copy(state.flyTo)
+    out.dist = 46
+    return out
+  }
+  if (state.hover >= 0 && !state.manual) {
+    out.target.copy(focus)
+    // Close enough to read the conversation you are pointing at, sized to that
+    // conversation's own island rather than a fixed number.
+    const island = state.store?.island.get(state.cols.session[state.hover])
+    out.dist = THREE.MathUtils.clamp((island ? island.radius : 8) * 3.2 + 10, 16, 90)
+    return out
+  }
+  out.target.copy(state.home.target)
+  out.dist = state.home.dist
+  return out
+}
+
+const pose = { target: new THREE.Vector3(), dist: 92 }
+
+/**
+ * Eases toward the desired pose and then stops writing to the camera at all.
+ * "Settled" has to mean no further motion, not asymptotically less of it.
+ */
+function updateCamera(dt, now, focus) {
+  if (!state.adaptive || now - state.lastUserZoom < 900) return
+  desiredPose(focus, pose)
+
+  const ctl = cloud.controls
+  const dir = cloud.camera.position.clone().sub(ctl.target)
+  const dist = dir.length()
+  const offTarget = ctl.target.distanceTo(pose.target)
+  const offDist = Math.abs(dist - pose.dist)
+
+  if (offTarget < 0.05 && offDist < 0.1) {
+    if (!settled) {
+      // Land exactly on the pose once, then leave the camera alone entirely.
+      ctl.target.copy(pose.target)
+      cloud.camera.position.copy(pose.target).add(dir.setLength(pose.dist))
+      settled = true
+      if (state.flyTo) state.flyTo = null
+    }
+    return
+  }
+
+  settled = false
+  const k = (1 - Math.pow(0.02, dt)) * 0.5
+  ctl.target.lerp(pose.target, k)
+  dir.setLength(THREE.MathUtils.lerp(dist, pose.dist, k))
+  cloud.camera.position.copy(ctl.target).add(dir)
+}
+
+/**
+ * Shift attention when a *different* conversation picks up the work.
+ *
+ * Flying to every arriving turn meant a busy session dragged the camera around
+ * every few seconds with the cursor untouched — motion the viewer never asked
+ * for. Turns landing in the conversation we are already watching are conveyed
+ * by their arrival flare instead, which costs no camera movement at all.
+ */
+let followed = null
+function followLive(msg, added) {
+  if (!state.followLive || !added.length) return
+  if (msg.sessionId === followed) return
+  // Never yank the view while it is being read or driven by hand.
+  if (state.hover >= 0 || state.manual) return
+  followed = msg.sessionId
+  worldPos(added[added.length - 1], _v, false)
+  state.flyTo = _v.clone()
+}
+
 /** Opens on the work in progress: frame the running conversations. */
 let framedLive = false
 function frameLive() {
@@ -422,6 +517,9 @@ function frameLive() {
   for (const i of centers) span = Math.max(span, c.distanceTo(new THREE.Vector3(...i.center)) + i.radius)
   cloud.controls.target.copy(c)
   cloud.camera.position.copy(c).add(new THREE.Vector3(0, span * 0.5 + 8, span * 2.2 + 34))
+  state.home.target.copy(c)
+  state.home.dist = cloud.camera.position.distanceTo(c)
+  settled = false
 }
 
 /* ---------- panels ---------- */
